@@ -30,36 +30,55 @@ NC="\033[0m"
 # Auto-grab latest version
 echo -e "${GREEN}Finding current MakeMKV version${NC}"
 
-# Check if VERSION_MAKEMKV file exists at root
-if [[ -f "$(git rev-parse --show-toplevel)/VERSION_MAKEMKV" ]]; then
-    MAKEMKV_VERSION=$(cat "$(git rev-parse --show-toplevel)/VERSION_MAKEMKV")
+# Check if VERSION_MAKEMKV exists in the ARM source tree.
+# The Docker build does not contain .git, so git rev-parse cannot
+# be used here.
+VERSION_FILE="/opt/arm/VERSION_MAKEMKV"
+
+if [[ -f "$VERSION_FILE" ]]; then
+    MAKEMKV_VERSION=$(tr -d '[:space:]' < "$VERSION_FILE")
     echo -e "Using MakeMKV version from VERSION_MAKEMKV: ${GREEN}$MAKEMKV_VERSION${NC}"
 else
-    echo -e "${RED}ERROR:${NC} VERSION_MAKEMKV file not found. Fetching latest version."
-    MAKEMKV_VERSION=$(curl -s https://www.makemkv.com/download/ | grep -o "[0-9.]*.txt" | sed 's/.txt//')
-    echo -e "Using MakeMKV version direct from MakeMKV: ${GREEN}$MAKEMKV_VERSION${NC}"
+    echo -e "${RED}ERROR:${NC} VERSION_MAKEMKV file not found at $VERSION_FILE"
+    exit 1
 fi
-
-echo -e "${GREEN}Downloading MakeMKV $MAKEMKV_VERSION sha, bin, and oss${NC}"
+echo -e "${GREEN}Preparing MakeMKV $MAKEMKV_VERSION${NC}"
 ## Finish ARM Modification
 
 set -ex
 savedAptMark="$(apt-mark showmanual)"
 
-wget -O 'sha256sums.txt.sig' "https://www.makemkv.com/download/makemkv-sha-${MAKEMKV_VERSION}.txt"
-GNUPGHOME="$(mktemp -d)" && export GNUPGHOME
-gpg --batch --keyserver keyserver.ubuntu.com --recv-keys 2ECF23305F1FC0B32001673394E3083A18042697
-gpg --batch --decrypt --output sha256sums.txt sha256sums.txt.sig
-gpgconf --kill all
-rm -rf "$GNUPGHOME" sha256sums.txt.sig
+# MakeMKV website is currently unavailable, so use the release
+# tarballs supplied in the Docker build context.
+OSS_TARBALL="/opt/arm/makemkv-oss-${MAKEMKV_VERSION}.tar.gz"
+BIN_TARBALL="/opt/arm/makemkv-bin-${MAKEMKV_VERSION}.tar.gz"
+
+echo -e "${GREEN}Using local MakeMKV release tarballs${NC}"
+
+if [[ ! -f "$OSS_TARBALL" ]]; then
+    echo -e "${RED}ERROR:${NC} $OSS_TARBALL not found"
+    exit 1
+fi
+
+if [[ ! -f "$BIN_TARBALL" ]]; then
+    echo -e "${RED}ERROR:${NC} $BIN_TARBALL not found"
+    exit 1
+fi
+
+echo -e "${GREEN}Checking MakeMKV tarballs${NC}"
+tar -tzf "$OSS_TARBALL" >/dev/null
+tar -tzf "$BIN_TARBALL" >/dev/null
+
+echo "OSS SHA256:"
+sha256sum "$OSS_TARBALL"
+
+echo "BIN SHA256:"
+sha256sum "$BIN_TARBALL"
+
 
 export PREFIX='/usr/local'
 for ball in makemkv-oss makemkv-bin; do
-	wget -O "$ball.tgz" "https://www.makemkv.com/download/${ball}-${MAKEMKV_VERSION}.tar.gz"
-	sha256="$(grep "  $ball-${MAKEMKV_VERSION}[.]tar[.]gz\$" sha256sums.txt)"
-	sha256="${sha256%% *}"
-	[ -n "$sha256" ]
-	echo "$sha256 *$ball.tgz" | sha256sum -c -
+	cp "/opt/arm/${ball}-${MAKEMKV_VERSION}.tar.gz" "$ball.tgz"
 	mkdir -p "$ball"
 	tar -xvf "$ball.tgz" -C "$ball" --strip-components=1
 	rm "$ball.tgz"
@@ -76,7 +95,6 @@ for ball in makemkv-oss makemkv-bin; do
 	rm -r "$ball"
 done
 
-rm sha256sums.txt
 apt-mark auto '.*' > /dev/null
 # shellcheck disable=SC2086
 [ -z "$savedAptMark" ] || apt-mark manual $savedAptMark # double quoting this var breaks the build

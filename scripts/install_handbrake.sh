@@ -57,7 +57,14 @@ rustup target add x86_64-pc-windows-gnu
 # build
 cd /tmp/handbrake
 nproc="$(nproc)"
-./configure --disable-gtk --enable-qsv --enable-vce --enable-libdovi --launch-jobs="$nproc" --launch
+./configure \
+    --disable-gtk \
+    --enable-qsv \
+    --enable-vce \
+    --enable-libdovi \
+    --launch-jobs="$nproc" \
+    --launch
+
 make -C build -j "$nproc"
 make -C build install
 cp /usr/local/bin/HandBrakeCLI /usr/bin/HandBrakeCLI

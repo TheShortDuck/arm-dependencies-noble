@@ -1,0 +1,160 @@
+###########################################################
+# base image, used for build stages and final images
+FROM phusion/baseimage:noble-1.0.2 AS base
+RUN mkdir /opt/arm
+WORKDIR /opt/arm
+
+# start by updating and upgrading the OS
+RUN \
+    apt clean && \
+    apt update && \
+    apt upgrade -y -o Dpkg::Options::="--force-confold"
+# create an arm group(gid 1000) and an arm user(uid 1000), with password logon disabled
+RUN if getent passwd 1000 >/dev/null; then \
+        usermod -l arm "$(getent passwd 1000 | cut -d: -f1)" && \
+        usermod -d /home/arm -m arm; \
+    else \
+        useradd -rm -d /home/arm -s /bin/bash -u 1000 arm; \
+    fi \
+    && if getent group 1000 >/dev/null; then \
+        groupmod -n arm "$(getent group 1000 | cut -d: -f1)"; \
+    else \
+        groupadd -g 1000 arm; \
+    fi \
+    && usermod -g 1000 arm \
+    && usermod -aG video,cdrom arm
+
+# enable support for Arch Linux and derivatives, who use a different user group for optical drive permissions
+RUN groupadd -g 990 optical \
+    && usermod -aG optical arm
+
+# Enable support for Fedora derivatives, which uses GID 11 for the cdrom group for optical drive permissions, whereas Ubuntu uses GID 24 for the same group name.
+RUN groupadd -g 11 cdrom_Fedora \
+   && usermod -aG cdrom_Fedora arm
+
+
+# set the default environment variables
+# UID and GID are not settable as of https://github.com/phusion/baseimage-docker/pull/86, as doing so would
+# break multi-account containers
+ENV ARM_UID=1000
+ENV ARM_GID=1000
+
+# setup gnupg/wget for add-ppa.sh
+RUN install_clean \
+        git \
+        wget \
+        curl \
+        build-essential \
+        libcurl4-openssl-dev \
+        libssl-dev \
+        gnupg \
+        libudev-dev \
+        udev \
+        python3 \
+        python3-dev \
+        python3-pip \
+        nano \
+        vim \
+        # arm extra requirements
+        scons swig libzbar-dev libzbar0
+
+###########################################################
+# install deps specific to the docker deployment
+FROM base AS deps-docker
+RUN install_clean gosu
+
+
+###########################################################
+# install deps for ripper
+FROM deps-docker AS deps-ripper
+RUN install_clean \
+        abcde \
+        eyed3 \
+        atomicparsley \
+        cdparanoia \
+        eject \
+        ffmpeg \
+        libva2 \
+        libva-drm2 \
+        mesa-va-drivers \
+        vainfo \
+        unzip \
+        flac \
+        glyrc \
+        default-jre-headless \
+        id3 \
+        id3v2 \
+        lame \
+        libavcodec-extra \
+        lsdvd \
+        mkcue \
+        vorbis-tools \
+        opus-tools \
+        fdkaac
+
+# install libdvd-pkg
+RUN \
+    install_clean libdvd-pkg && \
+    dpkg-reconfigure libdvd-pkg
+
+# install python reqs
+COPY requirements.txt ./requirements.txt
+RUN pip3 install --break-system-packages --ignore-installed --upgrade pip wheel setuptools psutil pyudev
+RUN pip3 install --break-system-packages --ignore-installed --prefer-binary -r ./requirements.txt
+
+###########################################################
+# install makemkv and handbrake
+FROM deps-ripper AS install-makemkv-handbrake
+
+# Install AMD AMF runtime
+RUN \
+    install_clean ca-certificates && \
+    mkdir -p /etc/apt/keyrings && \
+    curl -fsSL https://repo.radeon.com/amf/26.10.1/amf-pub.gpg \
+        -o /etc/apt/keyrings/amf-pub.asc && \
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/amf-pub.asc] https://repo.radeon.com/amf/26.10.1/ubuntu noble main" \
+        > /etc/apt/sources.list.d/amf.list && \
+    apt update && \
+    apt install -y amf-amdgpu-pro libamdenc-amdgpu-pro
+
+COPY ./scripts/install_mkv_hb_deps.sh /install_mkv_hb_deps.sh
+RUN chmod +x /install_mkv_hb_deps.sh && sleep 1 && \
+    /install_mkv_hb_deps.sh
+
+COPY ./scripts/install_handbrake.sh /install_handbrake.sh
+RUN chmod +x /install_handbrake.sh && sleep 1 && \
+    /install_handbrake.sh
+
+# MakeMKV setup by https://github.com/tianon
+COPY ./VERSION_MAKEMKV /opt/arm/VERSION_MAKEMKV
+COPY ./makemkv-oss-1.18.4.tar.gz /opt/arm/makemkv-oss-1.18.4.tar.gz
+COPY ./makemkv-bin-1.18.4.tar.gz /opt/arm/makemkv-bin-1.18.4.tar.gz
+COPY ./scripts/install_makemkv.sh /install_makemkv.sh
+RUN chmod +x /install_makemkv.sh && sleep 1 && \
+    /install_makemkv.sh
+
+# clean up apt
+RUN apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Container healthcheck
+COPY scripts/healthcheck.sh /healthcheck.sh
+RUN chmod +x /healthcheck.sh
+HEALTHCHECK --interval=5m --timeout=15s --start-period=30s CMD /healthcheck.sh
+
+# Set Timezone data
+ARG DEBIAN_FRONTEND=noninteractive
+ENV TZ=Etc/UTC
+RUN install_clean tzdata && \
+    ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && \
+    dpkg-reconfigure --frontend noninteractive tzdata
+
+ARG VERSION
+ARG BUILD_DATE
+# set metadata
+LABEL org.opencontainers.image.source=https://github.com/automatic-ripping-machine/arm-dependencies.git
+LABEL org.opencontainers.image.url=https://github.com/automatic-ripping-machine/arm-dependencies
+LABEL org.opencontainers.image.description="Dependencies for Automatic Ripping Machine"
+LABEL org.opencontainers.image.documentation=https://raw.githubusercontent.com/automatic-ripping-machine/arm-dependencies/main/README.md
+LABEL org.opencontainers.image.license=MIT
+LABEL org.opencontainers.image.version=$VERSION
+LABEL org.opencontainers.image.created=$BUILD_DATE
